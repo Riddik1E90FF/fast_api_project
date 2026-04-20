@@ -113,4 +113,6 @@ Defaults to `mongodb://localhost:27017` when `MONGO_URL` is not set.
 
 ## Screenshots
 
-Screenshots are located in the `screenshots/` folder at the project root.
+Screenshots are located in the `screenshots/` folder at the project root. 
+
+*Note from student: For lab 2 screenshots showing in-browser verification, look for screenshots starting with "ItemManager"*
