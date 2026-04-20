@@ -1,0 +1,228 @@
+<!-- This file was generated in tandem with Claude Code. -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Item Manager</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: sans-serif; background: #f4f4f4; padding: 2rem; }
+    h1 { margin-bottom: 1.5rem; color: #333; }
+    h2 { margin-bottom: 0.75rem; color: #555; }
+
+    .card {
+      background: white;
+      border-radius: 6px;
+      padding: 1.25rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    input, textarea {
+      display: block;
+      width: 100%;
+      padding: 0.4rem 0.5rem;
+      margin-bottom: 0.4rem;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+      font-size: 0.9rem;
+    }
+
+    button {
+      padding: 0.4rem 0.85rem;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+    }
+
+    .btn-primary { background: #4a90e2; color: white; }
+    .btn-danger  { background: #e25555; color: white; }
+    .btn-edit    { background: #f0a500; color: white; }
+    .btn-cancel  { background: #aaa; color: white; margin-left: 4px; }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid #eee; vertical-align: top; }
+    th { background: #f9f9f9; font-weight: 600; }
+    tr.editing { background: #fffbe6; }
+
+    #status { margin-top: 0.5rem; min-height: 1.2em; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+
+<h1>Item Manager</h1>
+
+<div class="card">
+  <h2>Create New Item</h2>
+  <form id="create-form">
+    <input type="text" id="new-name" placeholder="Name (required)" required />
+    <textarea id="new-desc" placeholder="Description (optional)" rows="2"></textarea>
+    <button type="submit" class="btn-primary">Create Item</button>
+  </form>
+  <p id="status"></p>
+</div>
+
+<div class="card">
+  <h2>All Items</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Name</th>
+        <th>Description</th>
+        <th>Actions</th>
+      </tr>
+    </thead>
+    <tbody id="items-tbody">
+      <tr><td colspan="4">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<script>
+  const API = "/items";
+
+  function setStatus(msg, ok = false) {
+    const el = document.getElementById("status");
+    el.style.color = ok ? "#2a9d3c" : "#e25555";
+    el.textContent = msg;
+    if (msg) setTimeout(() => { el.textContent = ""; }, 4000);
+  }
+
+  function escHtml(str) {
+    return String(str ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  // Render a normal (read) row
+  function renderRow(item) {
+    const tr = document.createElement("tr");
+    tr.dataset.id = item.id;
+    tr.dataset.name = item.name;
+    tr.dataset.description = item.description ?? "";
+    tr.innerHTML = `
+      <td style="font-size:0.72rem;word-break:break-all">${escHtml(item.id)}</td>
+      <td>${escHtml(item.name)}</td>
+      <td>${escHtml(item.description)}</td>
+      <td>
+        <button class="btn-edit" data-action="edit">Edit</button>
+        <button class="btn-danger" data-action="delete" style="margin-left:4px">Delete</button>
+      </td>
+    `;
+    return tr;
+  }
+
+  // Replace a row with an inline edit form
+  function makeEditRow(tr) {
+    const id   = tr.dataset.id;
+    const name = tr.dataset.name;
+    const desc = tr.dataset.description;
+
+    tr.classList.add("editing");
+    tr.innerHTML = `
+      <td style="font-size:0.72rem;word-break:break-all">${escHtml(id)}</td>
+      <td><input type="text" class="edit-name" value="${escHtml(name)}" required /></td>
+      <td><textarea class="edit-desc" rows="2">${escHtml(desc)}</textarea></td>
+      <td>
+        <button class="btn-primary" data-action="save">Save</button>
+        <button class="btn-cancel" data-action="cancel">Cancel</button>
+      </td>
+    `;
+  }
+
+  async function loadItems() {
+    const tbody = document.getElementById("items-tbody");
+    try {
+      const res = await fetch(API);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const items = await res.json();
+      tbody.innerHTML = "";
+      if (items.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4">No items yet.</td></tr>';
+        return;
+      }
+      items.forEach(item => tbody.appendChild(renderRow(item)));
+    } catch (err) {
+      tbody.innerHTML = `<tr><td colspan="4">Error: ${escHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  // Create
+  document.getElementById("create-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const name        = document.getElementById("new-name").value.trim();
+    const description = document.getElementById("new-desc").value.trim() || null;
+    try {
+      const res = await fetch(API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, description }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail ?? res.status);
+      document.getElementById("new-name").value = "";
+      document.getElementById("new-desc").value = "";
+      setStatus("Item created.", true);
+      loadItems();
+    } catch (err) {
+      setStatus(`Error: ${err.message}`);
+    }
+  });
+
+  // Edit / Delete / Save / Cancel — all handled via event delegation on tbody
+  document.getElementById("items-tbody").addEventListener("click", async (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+
+    const tr     = btn.closest("tr");
+    const id     = tr.dataset.id;
+    const action = btn.dataset.action;
+
+    if (action === "edit") {
+      makeEditRow(tr);
+      tr.querySelector(".edit-name").focus();
+    }
+
+    if (action === "cancel") {
+      loadItems();
+    }
+
+    if (action === "save") {
+      const name        = tr.querySelector(".edit-name").value.trim();
+      const description = tr.querySelector(".edit-desc").value.trim() || null;
+      if (!name) { alert("Name is required."); return; }
+      try {
+        const res = await fetch(`${API}/${id}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name, description }),
+        });
+        if (!res.ok) throw new Error((await res.json()).detail ?? res.status);
+        setStatus("Item updated.", true);
+        loadItems();
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+      }
+    }
+
+    if (action === "delete") {
+      if (!confirm("Delete this item?")) return;
+      try {
+        const res = await fetch(`${API}/${id}`, { method: "DELETE" });
+        if (!res.ok) throw new Error((await res.json()).detail ?? res.status);
+        setStatus("Item deleted.", true);
+        loadItems();
+      } catch (err) {
+        setStatus(`Error: ${err.message}`);
+      }
+    }
+  });
+
+  loadItems();
+</script>
+</body>
+</html>

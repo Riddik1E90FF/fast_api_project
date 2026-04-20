@@ -2,12 +2,11 @@ from typing import Optional
 
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
-# ---------------------------------------------------------------------------
 # Pydantic models
-# ---------------------------------------------------------------------------
+
 
 class ItemCreate(BaseModel):
     """Fields the caller provides when creating or updating an item."""
@@ -17,21 +16,16 @@ class ItemCreate(BaseModel):
 
 class ItemRead(BaseModel):
     """What the API returns — ObjectId serialised as a plain string 'id'."""
-    id: str = Field(alias="_id")
+    id: str
     name: str
     description: Optional[str] = None
 
-    model_config = {"populate_by_name": True}
 
-
-# ---------------------------------------------------------------------------
 # Helpers
-# ---------------------------------------------------------------------------
 
 def _doc_to_item(doc: dict) -> ItemRead:
     """Convert a raw MongoDB document to ItemRead, stringifying the ObjectId."""
-    doc["_id"] = str(doc["_id"])
-    return ItemRead(**doc)
+    return ItemRead(id=str(doc["_id"]), name=doc["name"], description=doc.get("description"))
 
 
 def get_client(mongo_url: str) -> AsyncIOMotorClient:
@@ -42,9 +36,7 @@ def get_collection(client: AsyncIOMotorClient):
     return client["items_db"]["items"]
 
 
-# ---------------------------------------------------------------------------
 # Data Access Layer
-# ---------------------------------------------------------------------------
 
 class ItemDAL:
     def __init__(self, collection):

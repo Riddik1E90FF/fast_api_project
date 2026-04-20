@@ -1,53 +1,65 @@
+import os
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from dal import ItemCreate, ItemDAL, ItemRead, get_client, get_collection
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    mongo_url = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
+    client = get_client(mongo_url)
+    app.state.dal = ItemDAL(get_collection(client))
+    yield
+    client.close()
 
-# Pydantic Model
 
-class Item(BaseModel):
-    name: str
-    description: str | None = None 
-    
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-# Endpoints
+@app.get("/items", response_model=list[ItemRead], status_code=200)
+async def get_all_items():
+    return await app.state.dal.get_all()
 
-# Get all items
-@app.get("/items", status_code=200)
-def get_all_items():
-    return list(items_db.values())
 
-# Get individual item with item_id 
-@app.get("/items/{item_id}", status_code=200)
-def get_item(item_id: int):
-    if item_id not in items_db:
+@app.get("/items/{item_id}", response_model=ItemRead, status_code=200)
+async def get_item(item_id: str):
+    item = await app.state.dal.get_one(item_id)
+    if item is None:
         raise HTTPException(status_code=404, detail="Item Not Found")
-    return items_db[item_id]
+    return item
 
 
-# Create item
-@app.post("/items", status_code=201)
-def create_item(item: Item):
-    global next_id
-    new_item = {"id": next_id, "name": item.name, "description": item.description}
-    items_db[next_id] = new_item
-    next_id += 1
-    return new_item
+@app.post("/items", response_model=ItemRead, status_code=201)
+async def create_item(item: ItemCreate):
+    return await app.state.dal.create(item)
 
-# Update item
-@app.put("/items/{item_id}", status_code=200)
-def update_item(item_id: int, item: Item):
-    if item_id not in items_db:
+
+@app.put("/items/{item_id}", response_model=ItemRead, status_code=200)
+async def update_item(item_id: str, item: ItemCreate):
+    updated = await app.state.dal.update(item_id, item)
+    if updated is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    items_db[item_id].update({"name": item.name, "description": item.description})
-    return items_db[item_id]
+    return updated
 
-# Delete item
+
 @app.delete("/items/{item_id}", status_code=200)
-def delete_item(item_id: int):
-    if item_id not in items_db:
+async def delete_item(item_id: str):
+    deleted = await app.state.dal.delete(item_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail="Item not found")
-    deleted = items_db.pop(item_id)
-    return {"message": "Item deleted", "item": deleted}
+    return {"message": "Item deleted", "id": item_id}
+
+
+# Static files must be mounted AFTER all API routes
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
