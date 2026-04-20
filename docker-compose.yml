@@ -1,7 +1,7 @@
 services:
   backend:
     build: ./backend
-    ports: 
+    ports:
       - "8000:8000"
     depends_on:
       - db
@@ -9,21 +9,20 @@ services:
       - app-network
     environment:
       - MONGO_URL=mongodb://db:27017
+
   db:
     container_name: db
     image: mongo:latest
     ports:
       - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
     networks:
       - app-network
-  # frontend:
-  #   build: ./frontend
-  #   ports:
-  #     - "3000:3000"
-  #   depends_on:
-  #     - api
+
+volumes:
+  mongo_data:
 
 networks:
   app-network:
     driver: bridge
-
