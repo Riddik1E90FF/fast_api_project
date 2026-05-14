@@ -40,7 +40,7 @@ Or with Python (see `model_runner_demo.py` in the project root):
 python model_runner_demo.py
 ```
 
-### Response
+### Model Runner response
 
 ```json
 {
@@ -201,9 +201,9 @@ copy model.pth ../model_service/model/model.pth
 docker-compose up --build
 ```
 
-- Frontend + API: http://localhost:8000
-- Swagger docs: http://localhost:8000/docs
-- Model service: http://localhost:8001/health
+- Frontend + API: <http://localhost:8000>
+- Swagger docs: <http://localhost:8000/docs>
+- Model service: <http://localhost:8001/health>
 - MongoDB: localhost:27017
 
 The model service starts first; the backend waits for its healthcheck before accepting requests.
