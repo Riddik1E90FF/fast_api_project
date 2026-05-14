@@ -4,11 +4,27 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      - db
+      db:
+        condition: service_started
+      model-service:
+        condition: service_healthy
     networks:
       - app-network
     environment:
       - MONGO_URL=mongodb://db:27017
+      - MODEL_SERVICE_URL=http://model-service:8001
+
+  model-service:
+    build: ./model_service
+    ports:
+      - "8001:8001"
+    networks:
+      - app-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
 
   db:
     container_name: db
