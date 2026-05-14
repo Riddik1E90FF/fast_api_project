@@ -4,80 +4,130 @@
 
 A full-stack item management application built with FastAPI, MongoDB, and vanilla JavaScript.
 The backend serves both the REST API and the frontend as static files.
-A PyTorch neural network is integrated for moon-cluster predictions via the `/predict` endpoint.
+Predictions are served by a dedicated containerized model service backed by a PyTorch neural network.
 
 ---
 
-## Database Choice: MongoDB
+## Part 1 — Docker Model Runner
 
-MongoDB was chosen for three reasons:
+### Model pulled
 
-1. **Async driver (Motor)** — Motor integrates natively with FastAPI's async runtime, meaning every database operation is non-blocking.
-2. **Flexible schema** — The optional `description` field fits naturally into MongoDB's document model without needing NULL columns or migrations.
-3. **Auto-generated IDs** — MongoDB assigns a unique `ObjectId` to every document automatically, removing the need for a manual counter.
+```bash
+docker model pull ai/smollm2:360M-instruct-q4_K_M
+docker model run  ai/smollm2:360M-instruct-q4_K_M
+```
+
+**Model image:** `ai/smollm2:360M-instruct-q4_K_M`
+A 360M-parameter SmolLM2 instruction-tuned language model quantized with Q4_K_M for efficient local inference.
+
+**Inference endpoint:** `http://localhost:12434/engines/llama.cpp/v1/chat/completions`
+Docker Model Runner exposes an OpenAI-compatible chat completions API — no custom serving code needed.
+
+### Test query
+
+```bash
+curl http://localhost:12434/engines/llama.cpp/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "ai/smollm2:360M-instruct-q4_K_M",
+    "messages": [{"role": "user", "content": "Explain what Docker is in one sentence."}]
+  }'
+```
+
+Or with Python (see `model_runner_demo.py` in the project root):
+
+```bash
+python model_runner_demo.py
+```
+
+### Response
+
+```json
+{
+  "id": "chatcmpl-...",
+  "object": "chat.completion",
+  "model": "ai/smollm2:360M-instruct-q4_K_M",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "Docker is a platform that packages applications and their dependencies into lightweight, portable containers that can run consistently across different environments."
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": { "prompt_tokens": 18, "completion_tokens": 28, "total_tokens": 46 }
+}
+```
+
+**Key concept:** Docker Model Runner gives you a standardized way to run AI models without writing Dockerfiles or configuring serving infrastructure. The model runs as a container and exposes an OpenAI-compatible HTTP API.
 
 ---
 
 ## Architecture
 
 ```
-Browser
-   |
-   |  HTTP (port 8000)
-   v
-+-------------------------------+
-|       FastAPI Backend         |
-|  +-------------------------+  |
-|  |  API Routes (/items)    |  |
-|  |  API Route  (/predict)  |  |
-|  +-----------+-------------+  |
-|              | async Motor    |
-|  +-----------v-------------+  |
-|  |   dal.py (ItemDAL)      |  |
-|  +-----------+-------------+  |
-|              |                |
-|  +-----------v-------------+  |
-|  |  model.py (PyTorch)     |  |
-|  |  MoonClassifier + pth   |  |
-|  +-------------------------+  |
-|  +-----------v-------------+  |
-|  | Static Files (/)        |  |
-|  | backend/static/         |  |
-|  +-------------------------+  |
-+---------------+---------------+
-                |
-                |  MongoDB Wire Protocol (port 27017)
-                v
-        +---------------+
-        |   MongoDB     |
-        |  (Docker)     |
-        +---------------+
+Browser / curl
+      |
+      |  HTTP (port 8000)
+      v
++-----------------------------+
+|       FastAPI Backend       |
+|   /items  →  ItemDAL        |
+|   /predict → proxy call     |
+|   /        → static files   |
++-------------|---------------+
+              |  async Motor          HTTP (port 8001)
+              |                  +--------------------------+
+              |  MongoDB Wire    |    Model Service         |
+              v  (port 27017)    |  /health  → status check |
+    +---------------+           |  /predict → MoonClassifier|
+    |   MongoDB     |           |  (PyTorch, make_moons)   |
+    |  (Docker)     |           +--------------------------+
+    +---------------+
+
+Request flow:
+  Client → API (:8000) → Model Service (:8001) → prediction
+                ↓
+          MongoDB (:27017) for /items endpoints
 ```
 
-Both services run as Docker containers connected via `app-network`.
-MongoDB data is persisted in the named Docker volume `mongo_data`.
+All services run as Docker containers on `app-network`.
+The backend waits for the model service to pass its `/health` check before accepting traffic.
+
+---
+
+## Services
+
+| Service         | Port | Description                                      |
+|-----------------|------|--------------------------------------------------|
+| `backend`       | 8000 | FastAPI — items CRUD + predict proxy + static UI |
+| `model-service` | 8001 | PyTorch MoonClassifier served via FastAPI        |
+| `db`            | 27017| MongoDB — item persistence                       |
 
 ---
 
 ## Endpoints
 
-| Method | Endpoint        | Status | Description                          |
-|--------|-----------------|--------|--------------------------------------|
-| GET    | /items          | 200    | Return all items                     |
-| GET    | /items/{id}     | 200    | Return a single item                 |
-| POST   | /items          | 201    | Create a new item                    |
-| PUT    | /items/{id}     | 200    | Update an existing item              |
-| DELETE | /items/{id}     | 200    | Delete an item                       |
-| POST   | /predict        | 200    | Run inference on the PyTorch model   |
+| Method | Endpoint        | Status | Description                                       |
+|--------|-----------------|--------|---------------------------------------------------|
+| GET    | /items          | 200    | Return all items                                  |
+| GET    | /items/{id}     | 200    | Return a single item                              |
+| POST   | /items          | 201    | Create a new item                                 |
+| PUT    | /items/{id}     | 200    | Update an existing item                           |
+| DELETE | /items/{id}     | 200    | Delete an item                                    |
+| POST   | /predict        | 200    | Proxy to model service — run MoonClassifier       |
 
 All `{id}` values are MongoDB ObjectId strings (24 hex characters).
-404 is returned when an item does not exist.
+`404` is returned when an item does not exist.
 
 ---
 
 ## POST /predict
 
-Runs a trained PyTorch classifier on two input coordinates and returns the predicted moon cluster.
+The main API forwards this request to the model service at `http://model-service:8001/predict`.
+The client always talks to port 8000 — the model container is internal only.
 
 ### Request body
 
@@ -96,14 +146,10 @@ Runs a trained PyTorch classifier on two input coordinates and returns the predi
 ```json
 {
   "prediction": "class_0",
-  "confidence": 0.9821
+  "confidence": 0.9821,
+  "model": "moon-classifier-v1"
 }
 ```
-
-| Field        | Type     | Description                                         |
-|--------------|----------|-----------------------------------------------------|
-| `prediction` | `string` | Predicted class — `"class_0"` or `"class_1"`        |
-| `confidence` | `float`  | Softmax probability of the predicted class (0–1)    |
 
 ### Example
 
@@ -114,39 +160,40 @@ curl -X POST http://localhost:8000/predict \
 ```
 
 Returns `422` if `features` does not contain exactly 2 values.
+Returns `503` if the model service is unreachable.
 
 ---
 
 ## PyTorch Model
 
 The model is a two-layer fully connected classifier trained on the `make_moons` dataset.
+Its weights (`model.pth`) and class definition (`model_def.py`) live inside `model_service/`.
 
-| Component   | Detail                        |
-|-------------|-------------------------------|
-| Architecture| `Linear(2,16) → ReLU → Linear(16,2)` |
-| Dataset     | `make_moons` (1000 samples, noise=0.2) |
-| Split       | 80% train / 20% test          |
-| Optimizer   | Adam (lr=0.01)                |
-| Loss        | CrossEntropyLoss              |
-| Epochs      | 100                           |
+| Component    | Detail                                        |
+|--------------|-----------------------------------------------|
+| Architecture | `Linear(2,16) → ReLU → Linear(16,2)`          |
+| Dataset      | `make_moons` (1000 samples, noise=0.2)        |
+| Split        | 80% train / 20% test                          |
+| Optimizer    | Adam (lr=0.01)                                |
+| Loss         | CrossEntropyLoss                              |
+| Epochs       | 100                                           |
 
-### Training the model
+### Re-training the model
 
-Run from the `backend/` directory before starting the server:
+Run from `backend/` and copy the output into `model_service/model/`:
 
 ```bash
 python train_model.py
+copy model.pth ../model_service/model/model.pth
 ```
-
-This generates `model.pth` in `backend/`. The server loads it at startup — it must exist before running the app or building the Docker image.
 
 ---
 
 ## Docker Setup
 
 ### Prerequisites
+
 - Docker Desktop installed and running
-- `model.pth` must be generated first (see Training the model above)
 
 ### Start the full stack
 
@@ -154,9 +201,12 @@ This generates `model.pth` in `backend/`. The server loads it at startup — it 
 docker-compose up --build
 ```
 
-- Frontend: http://localhost:8000
+- Frontend + API: http://localhost:8000
 - Swagger docs: http://localhost:8000/docs
+- Model service: http://localhost:8001/health
 - MongoDB: localhost:27017
+
+The model service starts first; the backend waits for its healthcheck before accepting requests.
 
 ### Stop (data is preserved)
 
@@ -174,19 +224,18 @@ docker-compose down -v
 
 ```bash
 docker-compose logs backend
+docker-compose logs model-service
 ```
 
 ---
 
-## Running Locally (without Docker)
+## Database Choice: MongoDB
 
-```bash
-pip install -r requirements.txt
-python train_model.py   # only needed once — generates model.pth
-uvicorn main:app --reload
-```
+MongoDB was chosen for three reasons:
 
-Defaults to `mongodb://localhost:27017` when `MONGO_URL` is not set.
+1. **Async driver (Motor)** — Motor integrates natively with FastAPI's async runtime, meaning every database operation is non-blocking.
+2. **Flexible schema** — The optional `description` field fits naturally into MongoDB's document model without needing NULL columns or migrations.
+3. **Auto-generated IDs** — MongoDB assigns a unique `ObjectId` to every document automatically, removing the need for a manual counter.
 
 ---
 
