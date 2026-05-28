@@ -4,7 +4,9 @@ from torch.utils.data import DataLoader, TensorDataset
 from sklearn.datasets import make_moons
 from sklearn.model_selection import train_test_split
 
-from model import MoonClassifier
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "model_service"))
+from model_def import MoonClassifier
 
 # --- Data ---
 X, y = make_moons(n_samples=1000, noise=0.2, random_state=42)

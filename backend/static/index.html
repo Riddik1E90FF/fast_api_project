@@ -53,11 +53,70 @@
     .predict-row label { font-size: 0.85rem; color: #555; display: block; margin-bottom: 0.2rem; }
     .predict-row input { width: 120px; margin-bottom: 0; }
     #predict-result { margin-top: 0.75rem; font-size: 0.95rem; min-height: 1.4em; }
+
+    /* Chat */
+    #chat-messages {
+      height: 260px;
+      overflow-y: auto;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 0.75rem;
+      margin-bottom: 0.6rem;
+      background: #fafafa;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .msg { max-width: 80%; padding: 0.45rem 0.7rem; border-radius: 12px; font-size: 0.9rem; line-height: 1.4; word-break: break-word; }
+    .msg-user { align-self: flex-end; background: #4a90e2; color: #fff; border-bottom-right-radius: 3px; }
+    .msg-ai   { align-self: flex-start; background: #e8e8e8; color: #333; border-bottom-left-radius: 3px; }
+    .msg-loading { align-self: flex-start; color: #999; font-style: italic; font-size: 0.85rem; }
+    .chat-input-row { display: flex; gap: 0.5rem; }
+    .chat-input-row input { flex: 1; margin-bottom: 0; }
+
+    /* Analyze */
+    #analyze-result {
+      margin-top: 0.75rem;
+      font-size: 0.88rem;
+      background: #f4f4f4;
+      border-radius: 4px;
+      padding: 0.6rem 0.75rem;
+      display: none;
+    }
+    #analyze-result .field { margin-bottom: 0.3rem; }
+    #analyze-result .field strong { color: #555; }
+    .tag { display: inline-block; background: #4a90e2; color: white; border-radius: 10px; padding: 0.1rem 0.5rem; font-size: 0.78rem; margin: 0.1rem 0.2rem 0.1rem 0; }
+    .tag.cat { background: #7c5cbf; }
+    .sentiment-positive { color: #2a9d3c; font-weight: 600; }
+    .sentiment-negative { color: #e25555; font-weight: 600; }
+    .sentiment-neutral  { color: #888;    font-weight: 600; }
   </style>
 </head>
 <body>
 
 <h1>Item Manager</h1>
+
+<div class="card">
+  <h2>AI Assistant</h2>
+  <p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem">
+    Ask for help naming, describing, or organizing your items.
+  </p>
+  <div id="chat-messages"></div>
+  <div class="chat-input-row">
+    <input type="text" id="chat-input" placeholder="Ask something…" />
+    <button class="btn-primary" id="chat-send">Send</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Item Analyzer</h2>
+  <p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem">
+    Paste an item name and description to extract categories, tags, sentiment, and a summary.
+  </p>
+  <textarea id="analyze-input" rows="3" placeholder="e.g. Blue Mechanical Keyboard — Cherry MX switches, RGB, USB-C"></textarea>
+  <button class="btn-primary" id="analyze-btn">Analyze</button>
+  <div id="analyze-result"></div>
+</div>
 
 <div class="card">
   <h2>Moon Classifier — Predict</h2>
@@ -247,6 +306,88 @@
   });
 
   loadItems();
+
+  // ── Chat ────────────────────────────────────────────────────────────────────
+  let chatHistory = [];
+
+  function appendMsg(text, role) {
+    const box = document.getElementById("chat-messages");
+    const div = document.createElement("div");
+    div.className = role === "user" ? "msg msg-user" : "msg msg-ai";
+    div.textContent = text;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+    return div;
+  }
+
+  async function sendChat() {
+    const input = document.getElementById("chat-input");
+    const msg = input.value.trim();
+    if (!msg) return;
+    input.value = "";
+    appendMsg(msg, "user");
+
+    const box = document.getElementById("chat-messages");
+    const loading = document.createElement("div");
+    loading.className = "msg-loading";
+    loading.textContent = "Thinking…";
+    box.appendChild(loading);
+    box.scrollTop = box.scrollHeight;
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: msg, conversation_history: chatHistory }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? res.status);
+      chatHistory = data.conversation_history;
+      loading.remove();
+      appendMsg(data.reply, "ai");
+    } catch (err) {
+      loading.remove();
+      appendMsg(`Error: ${err.message}`, "ai");
+    }
+  }
+
+  document.getElementById("chat-send").addEventListener("click", sendChat);
+  document.getElementById("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") sendChat();
+  });
+
+  // ── Analyze ─────────────────────────────────────────────────────────────────
+  document.getElementById("analyze-btn").addEventListener("click", async () => {
+    const content = document.getElementById("analyze-input").value.trim();
+    const resultDiv = document.getElementById("analyze-result");
+    if (!content) { resultDiv.style.display = "none"; return; }
+
+    resultDiv.style.display = "block";
+    resultDiv.innerHTML = "<em>Analyzing…</em>";
+
+    try {
+      const res = await fetch("/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? res.status);
+
+      const sentClass = `sentiment-${data.sentiment}`;
+      const cats = (data.categories ?? []).map(c => `<span class="tag cat">${escHtml(c)}</span>`).join("");
+      const tags = (data.tags ?? []).map(t => `<span class="tag">${escHtml(t)}</span>`).join("");
+
+      resultDiv.innerHTML = `
+        <div class="field"><strong>Summary:</strong> ${escHtml(data.summary)}</div>
+        <div class="field"><strong>Sentiment:</strong> <span class="${sentClass}">${escHtml(data.sentiment)}</span></div>
+        <div class="field"><strong>Categories:</strong> ${cats}</div>
+        <div class="field"><strong>Tags:</strong> ${tags}</div>
+      `;
+    } catch (err) {
+      resultDiv.innerHTML = `<span style="color:#e25555">Error: ${escHtml(err.message)}</span>`;
+    }
+  });
 
   document.getElementById("predict-btn").addEventListener("click", async () => {
     const x1 = Number.parseFloat(document.getElementById("feat1").value);

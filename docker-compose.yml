@@ -2,7 +2,7 @@ services:
   backend:
     build: ./backend
     ports:
-      - "8000:8000"
+      - "9000:9000"
     depends_on:
       db:
         condition: service_started
@@ -12,25 +12,27 @@ services:
       - app-network
     environment:
       - MONGO_URL=mongodb://db:27017
-      - MODEL_SERVICE_URL=http://model-service:8001
+      - MODEL_SERVICE_URL=http://model-service:9001
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
 
   model-service:
     build: ./model_service
     ports:
-      - "8001:8001"
+      - "9001:9001"
     networks:
       - app-network
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9001/health')"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 120s
 
   db:
     container_name: db
     image: mongo:latest
     ports:
-      - "27017:27017"
+      - "27015:27017"
     volumes:
       - mongo_data:/data/db
     networks:

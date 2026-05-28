@@ -8,6 +8,102 @@ Predictions are served by a dedicated containerized model service backed by a Py
 
 ---
 
+## Part 2 — LLM-Powered Features
+
+### Provider
+
+**Anthropic** (`anthropic` Python SDK, model `claude-haiku-4-5-20251001`).
+
+### API Key Setup
+
+```bash
+# .env  (never commit this file — it is in .gitignore)
+ANTHROPIC_API_KEY=sk-ant-your-key-here
+```
+
+`.env.example` is committed with a placeholder value so teammates know the variable is required.
+
+### Test script
+
+```bash
+# Windows PowerShell
+$env:ANTHROPIC_API_KEY = "sk-ant-your-key-here"
+python test_llm.py
+```
+
+Sends "What is Docker in one sentence?" to the LLM and prints the response.
+
+---
+
+### POST /chat
+
+**System message:**
+
+```
+You are a helpful assistant for the Item Manager app.
+Help users organize, name, and describe their inventory items.
+Suggest clear item names, concise descriptions, and practical categorization tips.
+Be brief and actionable.
+```
+
+**Why this system message?**
+It scopes the assistant to the domain of the app (item management) so every reply is relevant to what the user is actually doing: creating or organizing inventory entries. "Brief and actionable" keeps responses useful rather than verbose.
+
+**Conversation context:**
+The client sends `conversation_history` (an array of `{role, content}` objects) with each request and receives an updated copy in the response. This lets the frontend maintain multi-turn dialogue without any server-side session state.
+
+**Error handling:**
+- `anthropic.APIStatusError` → forwarded as the same HTTP status code
+- Any other exception → HTTP 500 with the error message
+
+---
+
+### POST /analyze
+
+**System message:**
+
+```
+You are an item classification assistant. Analyze the provided item name and description,
+then respond with ONLY valid JSON in this exact format:
+{
+  "categories": ["category1", "category2"],
+  "tags": ["tag1", "tag2", "tag3"],
+  "sentiment": "positive" | "negative" | "neutral",
+  "summary": "one sentence summary of the item"
+}
+Do not include any text outside the JSON object.
+```
+
+**Why this system message?**
+Instructing the model to return *only* a JSON object (no preamble or explanation) dramatically reduces the chance of parse failures. Enumerating the exact field names and types leaves no ambiguity about the expected schema.
+
+**Few-shot example included in the user turn:**
+
+```
+Example:
+Input: "Blue Mechanical Keyboard - Compact TKL with Cherry MX Blue switches, RGB backlight, USB-C. Great for gaming."
+Output: {"categories": ["electronics", "peripherals"], "tags": ["keyboard", "mechanical", "RGB", "gaming", "USB-C"],
+         "sentiment": "positive", "summary": "Compact RGB mechanical gaming keyboard with Cherry MX Blue switches."}
+```
+
+**Why a few-shot example?**
+One concrete example anchors the model to the exact output format — field order, array syntax, sentiment vocabulary — before it sees the real input.
+
+**Temperature:** `0.2` — low temperature produces consistent, deterministic JSON rather than creative variation.
+
+**JSON validation:**
+1. `json.loads()` — raises `JSONDecodeError` if the response is not valid JSON → HTTP 422
+2. Field presence check — verifies all four required keys exist → HTTP 422 with the missing field name
+3. `anthropic.APIStatusError` → forwarded as the matching HTTP status
+
+**Failure handling:**
+On `JSONDecodeError` the client receives HTTP 422 with the message `"LLM returned invalid JSON. Try again."`. The UI can retry the request; the low temperature setting (0.2) makes repeated failures very unlikely in practice.
+
+**Adaptation to this app:**
+The generic categories/tags/sentiment/summary schema is applied to **inventory items** rather than product reviews. The few-shot example uses an electronics item so the model understands what kind of content to expect.
+
+---
+
 ## Part 1 — Docker Model Runner
 
 ### Model pulled
