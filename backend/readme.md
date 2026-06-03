@@ -8,6 +8,179 @@ Predictions are served by a dedicated containerized model service backed by a Py
 
 ---
 
+## Lab 8 — Building an AI Agent
+
+This lab adds an AI **agent**: an LLM that can *act* on the app by calling its own
+API through tools, looping until a task is done. It is built in three parts.
+
+### Path chosen: **Path A — built from scratch on the raw Anthropic SDK**
+
+> I chose Path A because the rest of this app already talks to Claude through the
+> raw `anthropic` SDK (`/chat`, `/analyze`), so wrapping that same SDK in a tool
+> loop kept the dependency surface tiny — no LangChain, no version churn — and made
+> every moving part visible. The whole agent is one readable file
+> ([agent.py](agent.py)): the tool schemas, the `while` loop, the tool dispatch,
+> and the three guardrails are all right there instead of hidden inside a framework.
+> For a learning lab that is the point, and the agent loop is short enough that the
+> control flow (including human-in-the-loop confirmation) stays easy to follow.
+
+---
+
+### Part 1 — Function Calling Basics
+
+[function_calling_demo.py](function_calling_demo.py) is a **standalone** script
+(no server or database) that demonstrates the raw mechanics with three simple
+tools — `get_weather`, `calculate`, and `search_items`.
+
+```bash
+# Run it from the backend/ folder. It reads the key from fast_api_project/.env
+# automatically (preferring it over any stale ANTHROPIC_API_KEY left in the shell):
+python function_calling_demo.py
+```
+
+It prints the full flow for each prompt:
+
+```
+[USER] Do we have any items about Python in the database?
+[MODEL] stop_reason = tool_use
+[MODEL DECIDES] call search_items({"query": "Python"})
+[YOUR CODE RUNS] search_items -> {"query": "Python", "count": 2, "results": [...]}
+[MODEL -> FINAL] Yes! We have 2 items about Python in the database: ...
+```
+
+**Key concept:** the model only *decides* which tool to call and with what
+arguments. **Our code runs the function** and feeds the result back so the model
+can produce a final answer. The four phases are labelled in the script's output:
+`USER → MODEL DECIDES TOOL → YOUR CODE RUNS → MODEL FINAL ANSWER`.
+
+---
+
+### Part 2 — The Agent
+
+[agent.py](agent.py) wraps that mechanic in a loop and gives the model three tools
+that call **this app's own HTTP API**:
+
+| Tool | Description | API it calls |
+|------|-------------|--------------|
+| `search_items` | Search the collection by keyword; returns matching items. Used before creating to avoid duplicates. | `GET /items?q=<query>` |
+| `create_item` | Create a new item. **Destructive → requires user confirmation.** | `POST /items` |
+| `query_knowledge_base` | Ask a natural-language question about the collection (retrieval-augmented). | `POST /ask` (RAG) |
+
+**Architecture / how it connects:**
+
+```
+Browser ──► POST /agent ──► agent.run_agent_task()
+                                  │  loop (max AGENT_MAX_STEPS):
+                                  │    Claude decides a tool ──► requests.* ──┐
+                                  │                                          │  HTTP to self
+                                  ▼                                          ▼
+                          reasoning trace            GET /items?q · POST /items · POST /ask
+                                                              │                    │
+                                                          MongoDB            RAG: retrieve
+                                                                             items + Claude
+```
+
+The `/agent` and `/agent/confirm` endpoints are deliberately **synchronous**
+(`def`, not `async def`) so FastAPI runs them in a threadpool. The agent makes
+blocking `requests` calls back to the *same* app; running off the main event loop
+lets uvicorn serve those self-calls concurrently without deadlocking.
+
+**The RAG `/ask` endpoint** is a lightweight retrieve → augment → generate pipeline:
+it ranks items by keyword overlap with the question (simple lexical retrieval — no
+external vector store), stuffs the top matches into the prompt as context, and asks
+Claude to answer **using only that context**. It returns both the `answer` and the
+`sources` it used.
+
+#### `POST /agent` — request / response
+
+```jsonc
+// request
+{ "task": "Find items about Python, and if there aren't any, create one", "max_steps": 10 }
+
+// response (terminal)
+{
+  "session_id": "59d8aac4...",
+  "status": "done",                 // done | awaiting_confirmation | max_steps | error
+  "result": "I searched for Python and found none, so I created ...",
+  "pending_action": null,           // populated when status == awaiting_confirmation
+  "steps": [ /* ordered reasoning trace, see below */ ]
+}
+```
+
+---
+
+### Part 3 — Frontend + Guardrails
+
+The **AI Agent** card at the top of the UI ([static/index.html](static/index.html))
+provides a task input, a live loading spinner, the step-by-step reasoning trace
+(thoughts + every tool call with its input and output), an approve/deny banner when
+a destructive action is paused, and a clearly separated final result.
+
+#### Guardrails (all three implemented)
+
+| Guardrail | Why it matters | How it's done here |
+|-----------|----------------|--------------------|
+| **Max iterations** | A model that keeps calling tools could loop forever, burning tokens and money. | The loop is capped at `AGENT_MAX_STEPS` (default 10). On reaching it the agent returns `status: "max_steps"` instead of spinning. |
+| **Tool confirmation** | Destructive actions shouldn't fire without a human in the loop. Any tool named in `DESTRUCTIVE_TOOLS` is gated — currently `create_item` (the exposed destructive tool); `delete_item` is pre-registered so a future delete tool is auto-gated. | When the model requests a gated tool the loop **pauses** mid-run, persists the session, and returns `awaiting_confirmation` with the exact proposed call. The UI shows Approve/Deny; `POST /agent/confirm` resumes. A deny is fed back to the model as a tool_result so it can adapt instead of being stuck. |
+| **Error handling** | Tools fail (API down, bad arguments, unknown tool). A stack trace kills the loop; words don't. | Every tool call is wrapped so failures become a plain-text `tool_result` with `is_error=True`. The model reads the error and recovers. Verified against an unreachable API, hallucinated arguments, and an unknown tool. |
+
+---
+
+### Example task + real reasoning trace
+
+**Task:** *"Find items about Python, and if there aren't any, create one called
+'Python Crash Course' with a short description."* (collection starts empty)
+
+The agent searched first, found nothing, then **paused** before creating. After the
+user clicked **Approve**, it created the item and summarised. Abridged real trace:
+
+```jsonc
+// 1) POST /agent  → status: "awaiting_confirmation"
+{ "type": "thought", "text": "I'll start by searching for items about Python." }
+{ "type": "tool",    "tool": "search_items", "input": {"query": "Python"},
+  "output": "{\"query\": \"Python\", \"count\": 0, \"items\": []}", "error": false }
+{ "type": "thought", "text": "No items about Python were found. Now I'll create the item." }
+{ "type": "confirmation_required", "tool": "create_item",
+  "input": {"name": "Python Crash Course", "description": "A beginner-friendly guide ..."} }
+
+// 2) POST /agent/confirm {approved:true}  → status: "done"
+{ "type": "tool", "tool": "create_item", "confirmed": true,
+  "input":  {"name": "Python Crash Course", "description": "A beginner-friendly guide ..."},
+  "output": "{\"id\": \"6a206984...\", \"name\": \"Python Crash Course\", ...}", "error": false }
+
+// final result:
+// "Done! I searched for items about Python and found none. I've created a new item
+//  called 'Python Crash Course' ..."
+```
+
+---
+
+### Reflection — why Path A, and what surprised me
+
+I picked Path A (from scratch) over LangChain/LangGraph or the Claude Agent SDK
+because the build is small and I wanted to *see* the loop rather than trust a
+framework's defaults. The payoff: when I needed human-in-the-loop confirmation, I
+already understood exactly where in the loop to pause, because I'd written the loop.
+
+**What surprised me** was that the genuinely hard part wasn't the AI at all — it was
+the **message-shape contract**. The Anthropic API requires that an assistant turn
+containing `tool_use` blocks be answered by a user turn containing a `tool_result`
+for *every one of those blocks* before the next model call. That rule collides with
+"pause for confirmation": you can't send back a partial set of results. So the agent
+has to execute the safe tools in a turn, hold their results, and only assemble the
+reply-turn once the human resolves the destructive one — which is why an agent run is
+modelled as a resumable *session* rather than a single request. The LLM picking the
+right tool worked on the first try; getting the plumbing around it correct took the
+real effort. The other small surprise was the self-call deadlock risk — calling your
+own async API from inside an async handler can hang, which is why the agent endpoints
+are sync and run in a threadpool.
+
+> **Known tradeoff:** agent sessions are stored in an in-memory dict, so they don't
+> survive a server restart and aren't shared across multiple worker processes. That's
+> fine for this single-process demo; a production build would use Redis or a DB.
+
+---
+
 ## Part 2 — LLM-Powered Features
 
 ### Provider
@@ -208,12 +381,17 @@ The backend waits for the model service to pass its `/health` check before accep
 
 | Method | Endpoint        | Status | Description                                       |
 |--------|-----------------|--------|---------------------------------------------------|
-| GET    | /items          | 200    | Return all items                                  |
+| GET    | /items          | 200    | Return all items (optional `?q=` keyword filter)  |
 | GET    | /items/{id}     | 200    | Return a single item                              |
 | POST   | /items          | 201    | Create a new item                                 |
 | PUT    | /items/{id}     | 200    | Update an existing item                           |
 | DELETE | /items/{id}     | 200    | Delete an item                                    |
 | POST   | /predict        | 200    | Proxy to model service — run MoonClassifier       |
+| POST   | /chat           | 200    | LLM chat assistant                                |
+| POST   | /analyze        | 200    | LLM item classification (JSON)                    |
+| POST   | /ask            | 200    | RAG over items — returns answer + sources         |
+| POST   | /agent          | 200    | Run the agent on a task → result + reasoning trace|
+| POST   | /agent/confirm  | 200    | Approve/deny a paused destructive action, resume  |
 
 All `{id}` values are MongoDB ObjectId strings (24 hex characters).
 `404` is returned when an item does not exist.
@@ -340,3 +518,13 @@ MongoDB was chosen for three reasons:
 Screenshots are located in the `screenshots/` folder at the project root.
 
 *Note from student: For lab 2 screenshots showing in-browser verification, look for screenshots starting with "ItemManager"*
+
+**Lab 8 (AI Agent) — in-browser run of the compound task** *"Find items about Python,
+and if there aren't any, create one"* (`screenshots/Agent*.png`):
+
+| File | Shows |
+|------|-------|
+| `Agent1_Initial.png` | The AI Agent card before running |
+| `Agent2_AwaitingApproval.png` | Reasoning trace (thinking + `search_items` returning 0) **paused** at the create_item approval banner |
+| `Agent3_Result.png` | Full trace incl. the **approved** `create_item` call and the separated final result |
+| `Agent4_FullPage.png` | Whole page — the All Items table refreshed with the agent-created item |

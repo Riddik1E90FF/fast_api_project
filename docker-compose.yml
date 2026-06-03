@@ -10,10 +10,18 @@ services:
         condition: service_healthy
     networks:
       - app-network
+    # My api key kept breaking so claude helped me fix it:
+    # Load the API key straight from the .env FILE. Unlike "${ANTHROPIC_API_KEY}"
+    # substitution, env_file is NOT overridden by an ANTHROPIC_API_KEY left set in
+    # the shell that runs `docker compose`, so a stale session var can't shadow it.
+    env_file:
+      - .env
     environment:
       - MONGO_URL=mongodb://db:27017
       - MODEL_SERVICE_URL=http://model-service:9001
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      # The agent calls this app's own API; inside the container that is localhost:9000.
+      - AGENT_API_BASE=http://localhost:9000
+      - AGENT_MAX_STEPS=10
 
   model-service:
     build: ./model_service

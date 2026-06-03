@@ -90,11 +90,67 @@
     .sentiment-positive { color: #2a9d3c; font-weight: 600; }
     .sentiment-negative { color: #e25555; font-weight: 600; }
     .sentiment-neutral  { color: #888;    font-weight: 600; }
+
+    /* Agent */
+    .agent-card { border-left: 4px solid #7c5cbf; }
+    #agent-input { min-height: 3rem; }
+    #agent-loading { display: none; align-items: center; gap: 0.5rem; color: #7c5cbf; font-size: 0.88rem; margin-top: 0.6rem; }
+    .spinner {
+      width: 16px; height: 16px; border: 3px solid #ddd; border-top-color: #7c5cbf;
+      border-radius: 50%; animation: spin 0.8s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #agent-trace { margin-top: 0.75rem; display: flex; flex-direction: column; gap: 0.45rem; }
+    .step { padding: 0.5rem 0.65rem; border-radius: 5px; font-size: 0.85rem; line-height: 1.4; }
+    .step-thought    { background: #f3eefb; color: #4a3b66; }
+    .step-tool       { background: #eef5ff; border: 1px solid #d4e4ff; }
+    .step-tool-error { background: #fdecec; border: 1px solid #f6c9c9; color: #a32a2a; }
+    .step-pause      { background: #fff6e0; border: 1px solid #ffe2a8; color: #8a6400; }
+    .step-tag { display: inline-block; font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+                letter-spacing: 0.03em; padding: 0.05rem 0.4rem; border-radius: 8px; margin-right: 0.4rem; }
+    .step-tag.tool  { background: #4a90e2; color: #fff; }
+    .step-tag.pause { background: #f0a500; color: #fff; }
+    .step-thought .step-tag { background: #7c5cbf; color: #fff; }
+    .step-io { margin-top: 0.2rem; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.78rem;
+               word-break: break-word; color: #444; }
+    .badge { font-size: 0.7rem; padding: 0.05rem 0.4rem; border-radius: 8px; font-weight: 700; }
+    .badge.ok { background: #2a9d3c; color: #fff; }
+    .badge.no { background: #e25555; color: #fff; }
+
+    #agent-confirm { display: none; margin-top: 0.75rem; padding: 0.75rem; border-radius: 6px;
+                     background: #fff6e0; border: 1px solid #ffce6b; }
+    .confirm-title { font-weight: 700; color: #8a6400; margin-bottom: 0.4rem; }
+    #agent-confirm pre { background: #fff; border: 1px solid #eee; border-radius: 4px; padding: 0.4rem 0.6rem;
+                         font-size: 0.78rem; margin: 0.4rem 0 0.6rem; overflow-x: auto; }
+
+    #agent-final { display: none; margin-top: 0.85rem; padding: 0.75rem 0.85rem; border-radius: 6px;
+                   background: #eef9f0; border: 1px solid #bfe6c8; }
+    #agent-final.is-error { background: #fdecec; border-color: #f6c9c9; }
+    .final-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+                   color: #2a9d3c; margin-bottom: 0.3rem; }
+    #agent-final.is-error .final-label { color: #a32a2a; }
   </style>
 </head>
 <body>
 
 <h1>Item Manager</h1>
+
+<div class="card agent-card">
+  <h2>AI Agent</h2>
+  <p style="font-size:0.85rem;color:#666;margin-bottom:0.75rem">
+    Give the agent a task in plain English. It can search items, query the knowledge base,
+    and (with your approval) create items — calling the app's own API as it reasons.
+    Try: <em>"Find items about Python, and if there aren't any, create one."</em>
+  </p>
+  <textarea id="agent-input" rows="2" placeholder="Describe a task for the agent…"></textarea>
+  <button class="btn-primary" id="agent-run">Run Agent</button>
+  <div id="agent-loading"><span class="spinner"></span> Agent working… (this can take a few seconds)</div>
+
+  <div id="agent-trace"></div>
+  <div id="agent-confirm"></div>
+  <div id="agent-final"></div>
+</div>
 
 <div class="card">
   <h2>AI Assistant</h2>
@@ -414,6 +470,139 @@
       result.style.color = "#e25555";
       result.textContent = `Error: ${err.message}`;
     }
+  });
+
+  // ── Agent ─────────────────────────────────────────────────────────────────
+  let agentSessionId = null;
+
+  function setAgentLoading(on) {
+    document.getElementById("agent-loading").style.display = on ? "flex" : "none";
+    document.getElementById("agent-run").disabled = on;
+  }
+
+  function showAgentError(message) {
+    const finalBox = document.getElementById("agent-final");
+    finalBox.style.display = "block";
+    finalBox.classList.add("is-error");
+    finalBox.innerHTML = `<div class="final-label">Error</div><div>${escHtml(message)}</div>`;
+  }
+
+  function renderStep(step) {
+    const div = document.createElement("div");
+    div.className = "step";
+    if (step.type === "thought") {
+      div.classList.add("step-thought");
+      div.innerHTML = `<span class="step-tag">thinking</span>${escHtml(step.text)}`;
+    } else if (step.type === "tool") {
+      div.classList.add(step.error ? "step-tool-error" : "step-tool");
+      let badge = "";
+      if (step.confirmed) badge = ' <span class="badge ok">approved</span>';
+      if (step.declined)  badge = ' <span class="badge no">denied</span>';
+      div.innerHTML = `
+        <div><span class="step-tag tool">${escHtml(step.tool)}</span>${badge}</div>
+        <div class="step-io"><strong>input:</strong> ${escHtml(JSON.stringify(step.input))}</div>
+        <div class="step-io"><strong>output:</strong> ${escHtml(step.output)}</div>
+      `;
+    } else if (step.type === "confirmation_required") {
+      div.classList.add("step-pause");
+      div.innerHTML = `<span class="step-tag pause">paused</span>requested approval to run <strong>${escHtml(step.tool)}</strong>`;
+    } else if (step.type === "limit" || step.type === "error") {
+      div.classList.add("step-tool-error");
+      div.textContent = step.message;
+    }
+    return div;
+  }
+
+  function renderAgent(data) {
+    agentSessionId = data.session_id;
+
+    const trace = document.getElementById("agent-trace");
+    trace.innerHTML = "";
+    (data.steps || []).forEach(step => trace.appendChild(renderStep(step)));
+
+    const confirmBox = document.getElementById("agent-confirm");
+    const finalBox = document.getElementById("agent-final");
+
+    if (data.status === "awaiting_confirmation" && data.pending_action) {
+      const pa = data.pending_action;
+      finalBox.style.display = "none";
+      confirmBox.style.display = "block";
+      confirmBox.innerHTML = `
+        <div class="confirm-title">⚠ Approval required</div>
+        <div>The agent wants to run <strong>${escHtml(pa.tool)}</strong> with:</div>
+        <pre>${escHtml(JSON.stringify(pa.input, null, 2))}</pre>
+        <button class="btn-primary" id="agent-approve">Approve &amp; run</button>
+        <button class="btn-danger" id="agent-deny" style="margin-left:4px">Deny</button>
+      `;
+      document.getElementById("agent-approve").onclick = () => confirmAgent(true);
+      document.getElementById("agent-deny").onclick = () => confirmAgent(false);
+      return;
+    }
+
+    // Terminal state (done / max_steps / error): show the final result.
+    confirmBox.style.display = "none";
+    finalBox.style.display = "block";
+    finalBox.classList.toggle("is-error", data.status === "error");
+    let label = "Result";
+    if (data.status === "max_steps") label = "Stopped — step limit reached";
+    if (data.status === "error") label = "Error";
+    finalBox.innerHTML = `<div class="final-label">${label}</div><div>${escHtml(data.result || "")}</div>`;
+
+    // Items may have changed (e.g. agent created one) — refresh the table.
+    loadItems();
+  }
+
+  async function runAgent() {
+    const input = document.getElementById("agent-input");
+    const task = input.value.trim();
+    if (!task) return;
+
+    setAgentLoading(true);
+    document.getElementById("agent-trace").innerHTML = "";
+    document.getElementById("agent-confirm").style.display = "none";
+    const finalBox = document.getElementById("agent-final");
+    finalBox.style.display = "none";
+    finalBox.classList.remove("is-error");
+
+    try {
+      const res = await fetch("/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? res.status);
+      renderAgent(data);
+    } catch (err) {
+      showAgentError(err.message);
+    } finally {
+      setAgentLoading(false);
+    }
+  }
+
+  async function confirmAgent(approved) {
+    if (!agentSessionId) return;
+    setAgentLoading(true);
+    document.getElementById("agent-confirm").style.display = "none";
+    try {
+      const res = await fetch("/agent/confirm", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: agentSessionId, approved }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? res.status);
+      renderAgent(data);
+    } catch (err) {
+      showAgentError(err.message);
+    } finally {
+      setAgentLoading(false);
+    }
+  }
+
+  document.getElementById("agent-run").addEventListener("click", runAgent);
+  document.getElementById("agent-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) runAgent();
   });
 </script>
 </body>
